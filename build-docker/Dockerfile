@@ -19,6 +19,6 @@ RUN apt-get update && apt-get install -y cron
 RUN crontab crontab.txt
 
 # Start cron và chạy background
+CMD ["./entrypoint.sh"]
 
-CMD ["bash", "-c", "python crawler.py >> /app/crawl_metrics.log 2>&1"]
 

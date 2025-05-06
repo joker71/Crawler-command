@@ -16,8 +16,8 @@ def create_db_connection():
     conn = mysql.connector.connect(
         host='localhost',  # Thay thế bằng host của bạn nếu cần
         user='root',  # Tên người dùng MySQL
-        password='abcde12345-',  # Mật khẩu người dùng MySQL
-        database='github_data'  # Cơ sở dữ liệu bạn đã tạo
+        password='Hangnga98#',  # Mật khẩu người dùng MySQL
+        database='github_crawler'  # Cơ sở dữ liệu bạn đã tạo
     )
     return conn
 
@@ -46,9 +46,10 @@ def save_releases(conn, repo_id, releases):
     cursor = conn.cursor()
     for release in releases:
         created_at_mysql = convert_to_mysql_datetime(release['created_at'])
-        cursor.execute('''INSERT INTO releases (repo_id, name, url, tag_name, created_at) 
-                          VALUES (%s, %s, %s, %s, %s)''',
-                       (repo_id, release['name'], release['html_url'], release['tag_name'], created_at_mysql))
+        cursor.execute("""
+            INSERT INTO releases (repo_id, tag_name, body)
+            VALUES (%s, %s, %s)
+        """, (repo_id, tag_name, body))
     conn.commit()
 
 # Lưu commits vào cơ sở dữ liệu MySQL
