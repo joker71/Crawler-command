@@ -1,15 +1,15 @@
 import asyncio
+import time
+
 import aiohttp
-from aiohttp import ClientSession
+from aiohttp import TCPConnector
 from tqdm import tqdm
 import mysql.connector
 from datetime import datetime
-import logging
-import time
 
-logger = logging.getLogger(__name__)
+# ====== Đọc GitHub Token từ file ======
 def load_token():
-    with open("../token.txt", "r") as f:
+    with open("token.txt", "r") as f:
         return f.read().strip()
 
 GITHUB_TOKEN = load_token()
@@ -21,6 +21,7 @@ HEADERS = {
 
 # ====== MySQL Config ======
 DB_CONFIG = {
+    # 'host': 'host.docker.internal',
     'host': 'localhost',
     'user': 'root',
     'password': 'Hangnga98#',
@@ -43,76 +44,19 @@ def generate_search_queries():
             queries.append(query)
     return queries[:50]
 
-# Async hàm lấy repo
-async def fetch_repos(session: ClientSession, url: str):
+async def fetch_repos(session, url):
     async with session.get(url, headers=HEADERS) as resp:
         if resp.status != 200:
             return []
         data = await resp.json()
         return data.get("items", [])
 
-# Async hàm lấy release
-async def fetch_releases(session: aiohttp.ClientSession, full_name: str, token: str) -> list:
-    """
-    Fetch releases for a given GitHub repository.
-
-    Args:
-        session (aiohttp.ClientSession): The aiohttp session to reuse
-        full_name (str): Repository full name (e.g., "torvalds/linux")
-        token (str): GitHub personal access token
-
-    Returns:
-        list: List of release dictionaries or empty list
-    """
-    url = f"https://api.github.com/repos/{full_name}/releases"
-    headers = {
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "github-crawler"
-    }
-
-    try:
-        async with session.get(url, headers=headers) as response:
-            if response.status == 403:
-                logger.error(f"403 Forbidden for {full_name}")
-                rate_limit_remaining = response.headers.get("X-RateLimit-Remaining")
-                rate_limit_reset = response.headers.get("X-RateLimit-Reset")
-                if rate_limit_remaining == "0" and rate_limit_reset:
-                    reset_time = int(rate_limit_reset)
-                    wait_seconds = max(reset_time - int(time.time()), 0)
-                    logger.warning(f"Rate limit hit. Sleeping for {wait_seconds}s")
-                    await asyncio.sleep(wait_seconds)
-                    return await fetch_releases(session, full_name, token)  # retry
-                else:
-                    text = await response.text()
-                    logger.error(f"403 error details: {text}")
-                    return []
-
-            elif response.status != 200:
-                logger.error(f"Failed to fetch releases for {full_name}. Status: {response.status}")
-                text = await response.text()
-                logger.debug(f"Response text: {text}")
-                return []
-
-            data = await response.json()
-            if isinstance(data, list):
-                return data
-            else:
-                logger.warning(f"Unexpected data format for {full_name}")
-                return []
-
-    except aiohttp.ClientError as e:
-        logger.error(f"Client error fetching {full_name}: {str(e)}")
-        return []
-
-    except asyncio.TimeoutError:
-        logger.error(f"Timeout fetching {full_name}")
-        return []
-
-    except Exception as e:
-        logger.exception(f"Unexpected error: {str(e)}")
-        return []
-
+async def fetch_release(session, repo_full_name):
+    url = RELEASES_URL.format(repo=repo_full_name)
+    async with session.get(url, headers=HEADERS) as resp:
+        if resp.status == 200:
+            return {repo_full_name: await resp.json()}
+        return {repo_full_name: []}
 
 def save_repos_to_mysql(repos):
     conn = mysql.connector.connect(**DB_CONFIG)
@@ -167,25 +111,34 @@ def parse_time(timestr):
 async def get_top_5000_repos():
     queries = generate_search_queries()
     repos = []
-    async with aiohttp.ClientSession() as session:
+    connector = TCPConnector(ssl=False)
+    async with aiohttp.ClientSession(connector=connector) as session:
         tasks = [fetch_repos(session, url) for url in queries]
         results = await asyncio.gather(*tasks)
         for r in results:
             repos.extend(r)
     return repos[:5000]
 
-# Hàm crawl toàn bộ release song song
-async def crawl_all_releases(repos):
+async def crawl_all_releases(repo_names):
     results = []
-    semaphore = asyncio.Semaphore(20)  # giới hạn max 20 request song song
+    semaphore = asyncio.Semaphore(20)
+    connector = TCPConnector(ssl=False)
 
-    async with aiohttp.ClientSession() as session:
-        tasks = [fetch_releases(session, repo, GITHUB_TOKEN) for repo in repos]
-        results = await asyncio.gather(*tasks)
+    async def sem_fetch(repo):
+        async with semaphore:
+            return await fetch_release(session, repo)
+
+    async with aiohttp.ClientSession(connector=connector) as session:
+        tasks = [sem_fetch(repo) for repo in repo_names]
+        for future in tqdm(asyncio.as_completed(tasks), total=len(tasks)):
+            result = await future
+            results.append(result)
     return results
 
+
+
 async def main():
-    print("📦 Đang lấy danh sách top 5000 repositories...")
+    start_time = time.time()
     repos = await get_top_5000_repos()
     print(f"✅ Đã thu thập {len(repos)} repositories.")
 
@@ -201,6 +154,14 @@ async def main():
     save_releases_to_mysql(releases)
 
     print("🎉 Hoàn tất!")
+    total_repos = len(repos)
+    releases_count = len(releases)
+    end_time = time.time()
+    total_time = end_time - start_time
+    print(f"🕒 Tổng thời gian crawl: {total_time:.2f} giây")
+    print(f"🚀 Tốc độ xử lý repos: {total_repos / total_time:.2f} repos/s")
+    print(f"🚀 Tốc độ xử lý releases: {releases_count / total_time:.2f} releases/s")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
