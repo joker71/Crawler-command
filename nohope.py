@@ -42,6 +42,7 @@ logger.info("SSL context created with certifi certificates")
 
 SEARCH_URL = "https://api.github.com/search/repositories"
 RELEASES_URL = "https://api.github.com/repos/{repo}/releases"
+COMMITS_URL = "https://api.github.com/repos/{repo}/commits?sha={tag_name}"
 
 def generate_search_queries():
     queries = []
@@ -83,6 +84,21 @@ async def fetch_releases(session: aiohttp.ClientSession, full_name: str) -> list
         logger.error(f"Error fetching releases for {full_name}: {str(e)}")
         return []
 
+
+async def fetch_commits(session: aiohttp.ClientSession, full_name: str, tag_name: str):
+    url = f"https://api.github.com/repos/{full_name}/commits?sha={tag_name}"
+    try:
+        logger.debug(f"Fetching commits for {full_name} with tag {tag_name}")
+        data = await token_manager.queue_request(session, url, HEADERS)
+        if isinstance(data, list):
+            logger.info(f"Successfully fetched {len(data)} commits for {full_name} with tag {tag_name}")
+            return data
+        return []
+    except Exception as e:
+        logger.error(f"Error fetching commits for {full_name} with tag {tag_name}: {str(e)}")
+        return []
+
+
 async def get_top_5000_repos():
     queries = generate_search_queries()
     repos = []
@@ -104,7 +120,7 @@ def save_release(release_data, repo_name, output_dir='output'):
     filename = "releases.csv"
     filepath = os.path.join(output_dir, filename)
     
-    fieldnames = ['repo_name', 'tag_name', 'release_name', 'published_at', 'body']
+    fieldnames = ['repo_name', 'tag_name', 'release_name', 'published_at', 'body', 'id']
     file_exists = os.path.exists(filepath)
     
     with open(filepath, 'a', newline='', encoding='utf-8') as f:
@@ -113,16 +129,54 @@ def save_release(release_data, repo_name, output_dir='output'):
             writer.writeheader()
         
         for release in release_data:
+            body = release.get('body', '').replace('\n', ' ').replace('\r', ' ')
+            body = ' '.join(body.split())
             writer.writerow({
                 'repo_name': repo_name,
                 'tag_name': release.get('tag_name', ''),
                 'release_name': release.get('name', ''),
                 'published_at': release.get('published_at', ''),
-                'body': release.get('body', '')[:500]
+                'body': body,
+                'id': release.get('id', '')
             })
     
     logger.info(f"Saved {len(release_data)} releases for {repo_name} to {filepath}")
     return filepath
+
+def save_commits(commits, repo_name, tag_name, release_id, output_dir='output'):
+    os.makedirs(output_dir, exist_ok=True)
+    filename = "commits.csv"
+    filepath = os.path.join(output_dir, filename)
+
+    fieldnames = [
+        'repo_name',
+        'tag_name', 
+        'commit_sha',
+        'message',
+        'release_id'
+    ]
+    file_exists = os.path.exists(filepath)
+
+    with open(filepath, 'a', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+
+        for commit in commits:
+            commit_info = commit.get('commit', {})
+            message = commit_info.get('message', '').replace('\n', ' ').replace('\r', ' ')
+            message = ' '.join(message.split())
+            writer.writerow({
+                'repo_name': repo_name,
+                'tag_name': tag_name,
+                'commit_sha': commit.get('sha', ''),
+                'message': commit_info.get('message', ''),
+                'release_id': str(release_id)  # Ensure release_id is string
+            })
+    
+    logger.info(f"Saved {len(commits)} commits for {repo_name} at tag {tag_name}")
+    return filepath
+
 
 async def crawl_all_releases(repos):
     results = []
@@ -150,6 +204,58 @@ async def crawl_all_releases(repos):
                 continue
     
     logger.info(f"Completed fetching releases for all repositories")
+    return results
+
+async def crawl_all_commits(repos):
+    results = []
+    connector = TCPConnector(ssl=ssl_context)
+    logger.info(f"Starting to fetch commits for repositories...")
+    
+    # Create the output file with headers at the start
+    output_dir = 'output'
+    os.makedirs(output_dir, exist_ok=True)
+    filepath = os.path.join(output_dir, "commits.csv")
+    
+    # Read releases.csv to get repo and tag information
+    releases_file = os.path.join(output_dir, "releases.csv")
+    if not os.path.exists(releases_file):
+        logger.error("releases.csv not found. Please fetch releases first.")
+        return results
+
+    # Initialize commits.csv with headers
+    fieldnames = [
+        'repo_name',
+        'tag_name', 
+        'commit_sha',
+        'message',
+        'release_id'
+    ]
+    
+    with open(filepath, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+    
+    async with aiohttp.ClientSession(connector=connector) as session:
+        with open(releases_file, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                repo = row['repo_name']
+                tag = row['tag_name']
+                release_id = row['id']
+                if not tag or not release_id:  # Skip if no tag name or release id
+                    continue
+                
+                try:
+                    commits = await fetch_commits(session, repo, tag)
+                    if commits:  # Only save if we got some commits
+                        save_commits(commits, repo, tag, release_id)
+                        results.append({f"{repo}:{tag}": commits})
+                        logger.info(f"Processed commits for {repo} at tag {tag} (Release ID: {release_id})")
+                except Exception as e:
+                    logger.error(f"Error processing commits for {repo} at tag {tag}: {str(e)}")
+                    continue
+    
+    logger.info(f"Completed fetching commits for all repositories")
     return results
 
 def save_to_csv(data, output_type='repos', output_dir='output', filename=None):
@@ -211,6 +317,10 @@ async def main():
     print("⏳ Đang lấy thông tin release...")
     releases = await crawl_all_releases(repo_names)
     print("✅ Đã lưu thông tin releases")
+
+    print("⏳ Đang lấy thông tin commits...")
+    commits = await crawl_all_commits(repo_names)
+    print("✅ Đã lưu thông tin commits")
 
     # Print token status at the end
     token_status = token_manager.get_token_status()
