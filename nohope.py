@@ -180,35 +180,60 @@ def save_commits(commits, repo_name, tag_name, release_id, output_dir='output'):
 
 async def crawl_all_releases(repos):
     results = []
-    connector = TCPConnector(ssl=ssl_context)
+    connector = TCPConnector(ssl=ssl_context, limit=10)  # Reduce concurrent connections
     logger.info(f"Starting to fetch releases for {len(repos)} repositories...")
     
     # Create the output file with headers at the start
     output_dir = 'output'
     os.makedirs(output_dir, exist_ok=True)
     filepath = os.path.join(output_dir, "releases.csv")
-    fieldnames = ['repo_name', 'tag_name', 'release_name', 'published_at', 'body']
+    
+    # Initialize releases.csv with headers
+    fieldnames = ['repo_name', 'tag_name', 'release_name', 'published_at', 'body', 'id']
     with open(filepath, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
     
     async with aiohttp.ClientSession(connector=connector) as session:
-        for repo in repos:
-            try:
-                releases = await fetch_releases(session, repo)
-                if releases:  # Only save if we got some releases
-                    save_release(releases, repo)
-                    results.append({repo: releases})
-            except Exception as e:
-                logger.error(f"Error processing releases for {repo}: {str(e)}")
-                continue
+        # Process repositories in smaller batches
+        BATCH_SIZE = 5  # Reduce batch size
+        
+        for i in range(0, len(repos), BATCH_SIZE):
+            batch = repos[i:i + BATCH_SIZE]
+            logger.info(f"Processing batch {i//BATCH_SIZE + 1}/{(len(repos) + BATCH_SIZE - 1)//BATCH_SIZE}")
+            
+            # Create tasks for the batch
+            tasks = []
+            for repo in batch:
+                task = asyncio.create_task(fetch_releases(session, repo))
+                tasks.append((repo, task))
+            
+            # Add delay between batches to prevent rate limit exhaustion
+            if i > 0:
+                await asyncio.sleep(2)  # 2 second delay between batches
+            
+            # Wait for all tasks in the batch to complete
+            for repo, task in tasks:
+                try:
+                    releases = await task
+                    if releases:
+                        save_release(releases, repo)
+                        results.append({repo: releases})
+                        logger.info(f"Processed and saved {len(releases)} releases for {repo}")
+                    else:
+                        logger.warning(f"No releases found for {repo}")
+                except Exception as e:
+                    logger.error(f"Error processing releases for {repo}: {str(e)}")
+                    continue
+            
+            logger.info(f"Completed batch {i//BATCH_SIZE + 1}")
     
     logger.info(f"Completed fetching releases for all repositories")
     return results
 
 async def crawl_all_commits(repos):
     results = []
-    connector = TCPConnector(ssl=ssl_context)
+    connector = TCPConnector(ssl=ssl_context, limit=10)  # Reduce concurrent connections
     logger.info(f"Starting to fetch commits for repositories...")
     
     # Create the output file with headers at the start
@@ -216,12 +241,6 @@ async def crawl_all_commits(repos):
     os.makedirs(output_dir, exist_ok=True)
     filepath = os.path.join(output_dir, "commits.csv")
     
-    # Read releases.csv to get repo and tag information
-    releases_file = os.path.join(output_dir, "releases.csv")
-    if not os.path.exists(releases_file):
-        logger.error("releases.csv not found. Please fetch releases first.")
-        return results
-
     # Initialize commits.csv with headers
     fieldnames = [
         'repo_name',
@@ -236,24 +255,63 @@ async def crawl_all_commits(repos):
         writer.writeheader()
     
     async with aiohttp.ClientSession(connector=connector) as session:
+        # Read releases.csv to get repo and tag information
+        releases_file = os.path.join(output_dir, "releases.csv")
+        if not os.path.exists(releases_file):
+            logger.error("releases.csv not found. Please fetch releases first.")
+            return results
+
+        # Read all releases and group them by repository
+        repo_releases = {}
         with open(releases_file, 'r', newline='', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for row in reader:
                 repo = row['repo_name']
-                tag = row['tag_name']
-                release_id = row['id']
-                if not tag or not release_id:  # Skip if no tag name or release id
-                    continue
-                
+                if repo not in repo_releases:
+                    repo_releases[repo] = []
+                repo_releases[repo].append({
+                    'tag_name': row['tag_name'],
+                    'release_id': row['id']
+                })
+
+        # Process repositories in smaller batches
+        BATCH_SIZE = 5  # Reduce batch size
+        repos_to_process = list(repo_releases.keys())
+        
+        for i in range(0, len(repos_to_process), BATCH_SIZE):
+            batch_repos = repos_to_process[i:i + BATCH_SIZE]
+            logger.info(f"Processing batch {i//BATCH_SIZE + 1}/{(len(repos_to_process) + BATCH_SIZE - 1)//BATCH_SIZE}")
+            
+            # Create tasks for each repository's releases
+            tasks = []
+            for repo in batch_repos:
+                # Process first 3 releases per repository to reduce load
+                for release in repo_releases[repo][:3]:
+                    tag = release['tag_name']
+                    release_id = release['release_id']
+                    if tag and release_id:
+                        task = asyncio.create_task(fetch_commits(session, repo, tag))
+                        tasks.append((repo, tag, release_id, task))
+            
+            # Add delay between batches to prevent rate limit exhaustion
+            if i > 0:
+                await asyncio.sleep(2)  # 2 second delay between batches
+            
+            # Wait for all tasks in the batch to complete
+            for repo, tag, release_id, task in tasks:
                 try:
-                    commits = await fetch_commits(session, repo, tag)
-                    if commits:  # Only save if we got some commits
+                    commits = await task
+                    if commits:
                         save_commits(commits, repo, tag, release_id)
                         results.append({f"{repo}:{tag}": commits})
-                        logger.info(f"Processed commits for {repo} at tag {tag} (Release ID: {release_id})")
+                        logger.info(f"Processed and saved {len(commits)} commits for {repo} at tag {tag}")
+                    else:
+                        logger.warning(f"No commits found for {repo} at tag {tag}")
                 except Exception as e:
                     logger.error(f"Error processing commits for {repo} at tag {tag}: {str(e)}")
                     continue
+            
+            logger.info(f"Completed batch {i//BATCH_SIZE + 1}")
     
     logger.info(f"Completed fetching commits for all repositories")
     return results
