@@ -14,7 +14,7 @@ from token_manager import TokenManager
 DB_CONFIG = {
     'host': 'host.docker.internal',
     'user': 'root',
-    'password': 'Hangnga98#',
+    'password': 'abcde12345-',
     'database': 'github_crawler'
 }
 
@@ -365,17 +365,20 @@ async def crawl():
 
     # Print token status at the end
     token_status = token_manager.get_token_status()
-    print("\nToken Usage Summary:")
+    logger.info("\nToken Usage Summary:")
     for status in token_status:
-        print(f"Token {status['token_index']}:")
-        print(f"  - Remaining requests: {status['remaining']}/{status['limit']}")
-        print(f"  - Success rate: {status['success_rate']:.2%}")
-        print(f"  - Status: {'Cooling down' if status['is_cooling_down'] else 'Active'}")
+        logger.info(f"Token {status['token_index']}:")
+        logger.info(f"  - Remaining requests: {status['remaining']}/{status['limit']}")
+        logger.info(f"  - Success rate: {status['success_rate']:.2%}")
+        logger.info(f"  - Status: {'Cooling down' if status['is_cooling_down'] else 'Active'}")
 
     logger.info("Crawler completed successfully")
     print("🎉 Hoàn tất!")
 
-async def crawl():
-    asyncio.run(crawl())
+async def run_periodically():
+    while True:
+        await crawl()
+        await asyncio.sleep(10,800)  # 4 phút = 240 giây
+
 if __name__ == "__main__":
-    asyncio.run(crawl())
+    asyncio.run(run_periodically())

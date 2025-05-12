@@ -14,6 +14,6 @@ COPY . .
 RUN apt-get update && apt-get install -y cron
 
 
-CMD ["python", "crawler_schedule.py"]
+CMD ["python", "nohope.py"]
 
 
