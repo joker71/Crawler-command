@@ -1,1 +1,0 @@
-*/20 * * * * cd /app && /usr/local/bin/python crawler.py >> /app/log.txt 2>&1

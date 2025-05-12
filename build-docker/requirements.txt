@@ -1,3 +1,0 @@
-aiohttp
-mysql-connector-python
-tqdm

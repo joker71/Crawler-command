@@ -2,3 +2,5 @@ aiohttp>=3.8.0
 tqdm>=4.65.0
 mysql-connector-python>=8.0.0
 certifi>=2023.7.22
+alembic~=1.13.3
+schedule
